@@ -75,7 +75,8 @@
 
 ```
 menu/
-├── index.html   # 全部代码（HTML + CSS + JS + 内置菜谱数据）
+├── index.html   # 网页主体（HTML + CSS + JS 逻辑）
+├── data.js      # 菜谱数据层（DEFAULT_DB，79道家常菜，可单独维护）
 └── README.md
 ```
 

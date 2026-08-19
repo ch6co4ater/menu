@@ -232,6 +232,7 @@
     font-size: 11px; font-weight: 600; margin-left: 5px; vertical-align: middle;
   }
   .tag-lowfat { background: #d5f5e3; color: #1e8449; }
+  .tag-single { background: #fadbd8; color: #c0392b; }
   .tag-cat { background: #fef5e7; color: #a04000; }
   .dish-meta { font-size: 12px; color: #999; margin-bottom: 12px; min-height: 16px; }
   .random-btn {
@@ -467,6 +468,7 @@
   .badge.meat { background: #c0392b; }
   .badge.veg { background: #27ae60; }
   .badge.lf { background: #27ae60; }
+  .badge.su { background: #e67e22; }
   .section-title {
     font-size: 13px; font-weight: 700; color: #8b4513;
     margin: 10px 0 6px; display: flex; align-items: center; gap: 5px;
@@ -907,7 +909,7 @@ function updateConfirmBtn() {
 }
 
 /* ===== 一周菜谱生成 ===== */
-// 每份菜做2顿，5天需3荤3素（前两份各2天，第三份1天+余量）
+// 每份菜做2顿，5天需3荤3素；鱼类(singleUse)只能吃1天
 function generateWeek() {
   const mPool = filterDishesForRandom('meat');
   const vPool = filterDishesForRandom('veg');
@@ -918,17 +920,43 @@ function generateWeek() {
   // 抽3道不重复的荤菜和素菜
   const meats = pickN(mPool, 3);
   const vegs = pickN(vPool, 3);
-  // 按 2-2-1 分配：周一周二=荤0素0, 周三周四=荤1素1, 周五=荤2素2
-  state.weekPlan = [
-    { meat: meats[0], veg: vegs[0] },
-    { meat: meats[0], veg: vegs[0] },
-    { meat: meats[1], veg: vegs[1] },
-    { meat: meats[1], veg: vegs[1] },
-    { meat: meats[2], veg: vegs[2] }
-  ];
+  state.weekPlan = buildWeekPlan(meats, vegs);
   renderWeek();
   updateConfirmBtn();
   return true;
+}
+
+// 根据 singleUse 属性构建5天分配
+function buildWeekPlan(meats, vegs) {
+  return Array.from({ length: 5 }, (_, i) => ({
+    meat: buildAssignment(meats)[i],
+    veg: buildAssignment(vegs)[i]
+  }));
+}
+
+// 3道菜分配到5天：singleUse 菜只出现1次，其他菜各2次
+function buildAssignment(dishes) {
+  const suIdx = dishes.findIndex(d => d.singleUse);
+  if (suIdx === -1) {
+    // 无 singleUse，按 2-2-1 分配
+    return [dishes[0], dishes[0], dishes[1], dishes[1], dishes[2]];
+  }
+  // 有 singleUse：它只出现在随机1天，另外2道菜各2次
+  const suDay = Math.floor(Math.random() * 5);
+  const others = dishes.filter((_, i) => i !== suIdx);
+  const remaining = [0,1,2,3,4].filter(i => i !== suDay);
+  // 打乱剩余4天分配给两道普通菜
+  for (let i = remaining.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [remaining[i], remaining[j]] = [remaining[j], remaining[i]];
+  }
+  const result = new Array(5);
+  result[suDay] = dishes[suIdx];
+  result[remaining[0]] = others[0];
+  result[remaining[1]] = others[0];
+  result[remaining[2]] = others[1];
+  result[remaining[3]] = others[1];
+  return result;
 }
 
 // 从池子中随机抽N道不重复的菜
@@ -951,14 +979,26 @@ function swapDishGroup(dishName, type) {
   let candidates = pool.filter(d => d.name !== dishName);
   if (candidates.length === 0) candidates = pool;
   const newDish = pickRandom(candidates);
-  // 替换本周所有用到这道菜的天
+  // 如果新菜是 singleUse（如鱼类），只替换1天；否则替换所有
   let changed = 0;
-  state.weekPlan.forEach(d => {
-    if (d[type] && d[type].name === dishName) {
-      d[type] = newDish;
-      changed++;
+  if (newDish.singleUse) {
+    // 只替换第一个匹配项
+    for (let i = 0; i < state.weekPlan.length; i++) {
+      if (state.weekPlan[i][type] && state.weekPlan[i][type].name === dishName) {
+        state.weekPlan[i][type] = newDish;
+        changed = 1;
+        break;
+      }
     }
-  });
+  } else {
+    // 替换所有匹配项
+    state.weekPlan.forEach(d => {
+      if (d[type] && d[type].name === dishName) {
+        d[type] = newDish;
+        changed++;
+      }
+    });
+  }
   toast(`已将「${dishName}」替换为「${newDish.name}」（影响 ${changed} 天）`);
   renderWeek();
   updateConfirmBtn();
@@ -995,7 +1035,7 @@ function renderWeek() {
     }
   });
   summary.style.display = 'block';
-  summary.innerHTML = `📊 本周共需做 <strong>${meatMap.size}道荤菜</strong> + <strong>${vegMap.size}道素菜</strong>（每份按2顿算，覆盖5天午餐，周五有余量）<br>
+  summary.innerHTML = `📊 本周共需做 <strong>${meatMap.size}道荤菜</strong> + <strong>${vegMap.size}道素菜</strong>（鱼类仅吃1天，其他每份按2顿算，覆盖5天午餐）<br>
     🛒 预计采购 <strong>${meatMap.size + vegMap.size}份菜</strong>的食材，点击下方「查看本周菜谱详情」可看完整采购清单`;
 
   // 渲染本周菜品集（顶部，每道菜一个换菜按钮）
@@ -1005,16 +1045,17 @@ function renderWeek() {
     }
     const items = [...map.values()].map(e => {
       const dayStr = e.days.map(i => DAY_NAMES[i]).join('、');
-      const tags = `${e.dish.lowFat ? '<span class="dish-tag tag-lowfat">减脂</span>':''}<span class="dish-tag tag-cat">${e.dish.category}</span>`;
+      const tags = `${e.dish.lowFat ? '<span class="dish-tag tag-lowfat">减脂</span>':''}${e.dish.singleUse ? '<span class="dish-tag tag-single">单次</span>':''}<span class="dish-tag tag-cat">${e.dish.category}</span>`;
+      const tip = e.dish.singleUse ? '（鱼类仅吃1天）' : '';
       return `
         <div class="dg-item">
           <div class="info">
             <span class="nm">${e.dish.name}</span>
             ${tags}
-            <span class="days">${dayStr}</span>
+            <span class="days">${dayStr}${tip}</span>
           </div>
           <div class="ops">
-            <button class="swap-btn" data-name="${e.dish.name}" data-type="${type}">🔄 换菜</button>
+            <button class="swap-btn" data-name="${e.dish.name}" data-type="${type}" title="${tip}">🔄 换菜</button>
           </div>
         </div>`;
     }).join('');
@@ -1030,8 +1071,8 @@ function renderWeek() {
 
   list.innerHTML = state.weekPlan.map((d, i) => {
     const isRepeat = i > 0 && state.weekPlan[i-1].meat?.name === d.meat?.name;
-    const mTags = d.meat ? `${d.meat.lowFat ? '<span class="dish-tag tag-lowfat">减脂</span>':''}<span class="dish-tag tag-cat">${d.meat.category}</span>` : '';
-    const vTags = d.veg ? `${d.veg.lowFat ? '<span class="dish-tag tag-lowfat">减脂</span>':''}<span class="dish-tag tag-cat">${d.veg.category}</span>` : '';
+    const mTags = d.meat ? `${d.meat.lowFat ? '<span class="dish-tag tag-lowfat">减脂</span>':''}${d.meat.singleUse ? '<span class="dish-tag tag-single">单次</span>':''}<span class="dish-tag tag-cat">${d.meat.category}</span>` : '';
+    const vTags = d.veg ? `${d.veg.lowFat ? '<span class="dish-tag tag-lowfat">减脂</span>':''}${d.veg.singleUse ? '<span class="dish-tag tag-single">单次</span>':''}<span class="dish-tag tag-cat">${d.veg.category}</span>` : '';
     return `
       <div class="day-card${isRepeat ? ' repeat' : ''}">
         <div class="day-label">${DAY_NAMES[i]}${isRepeat ? '<small>同上</small>' : ''}</div>
@@ -1063,6 +1104,7 @@ function renderDishBlock(dish, type) {
       <h3>
         <span class="badge ${cls}">${badgeLabel}</span>
         ${dish.lowFat ? '<span class="badge lf">减脂</span>' : ''}
+        ${dish.singleUse ? '<span class="badge su">单次</span>' : ''}
         <span class="dish-tag tag-cat" style="margin-left:auto;">${dish.category}</span>
       </h3>
       <div style="color:#a0896b;font-size:13px;margin-bottom:6px;">${dish.name}</div>
@@ -1165,12 +1207,13 @@ function renderManageGrid() {
       ? '<span class="dish-tag" style="background:#fadbd8;color:#c0392b;">荤</span>'
       : '<span class="dish-tag" style="background:#d5f5e3;color:#1e8449;">素</span>';
     const lfBadge = d.lowFat ? '<span class="dish-tag tag-lowfat">减脂</span>' : '';
+    const suBadge = d.singleUse ? '<span class="dish-tag tag-single">单次</span>' : '';
     const ingPreview = d.ingredients.slice(0, 4).map(i => i.split(' ')[0]).join('、') + (d.ingredients.length > 4 ? '…' : '');
     return `
       <div class="dish-item">
         <div class="dish-item-head">
           <div class="dish-item-title">${d.name}</div>
-          <div class="dish-item-tags">${typeBadge}${lfBadge}<span class="dish-tag tag-cat">${d.category}</span></div>
+          <div class="dish-item-tags">${typeBadge}${lfBadge}${suBadge}<span class="dish-tag tag-cat">${d.category}</span></div>
         </div>
         <div class="dish-item-desc">主要食材：${ingPreview}</div>
         <div class="dish-item-actions">

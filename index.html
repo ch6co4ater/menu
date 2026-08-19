@@ -651,9 +651,38 @@
       </div>
 
       <div class="dish-grid" id="dishGrid"></div>
-      <div style="text-align:right; margin-top:14px;">
+      <div style="display:flex; justify-content:space-between; margin-top:14px; flex-wrap:wrap; gap:8px;">
+        <button class="btn btn-ghost btn-sm" id="aiConfigBtn">⚙️ AI 接口配置</button>
         <button class="btn btn-ghost btn-sm" id="resetDBBtn">↩️ 恢复默认菜谱库</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ AI 接口配置弹窗 ============ -->
+<div class="modal" id="aiConfigModal">
+  <div class="modal-content" style="max-width:480px;">
+    <button class="modal-close" data-close="aiConfigModal">&times;</button>
+    <div class="modal-title">⚙️ AI 接口配置</div>
+    <p style="font-size:13px; color:#8b6914; margin-bottom:14px; line-height:1.7;">
+      配置兼容 OpenAI 格式的 API（如智谱 GLM、DeepSeek、OpenAI 等），用于「AI 匹配」自动填充菜谱信息。<br>
+      数据仅保存在本地浏览器，不会上传到第三方。
+    </p>
+    <div class="form-row">
+      <label>API 地址 (Base URL)</label>
+      <input class="input" id="ai_baseUrl" placeholder="如：https://open.bigmodel.cn/api/paas/v4">
+    </div>
+    <div class="form-row">
+      <label>API Key</label>
+      <input class="input" id="ai_apiKey" type="password" placeholder="你的 API Key">
+    </div>
+    <div class="form-row">
+      <label>模型名称</label>
+      <input class="input" id="ai_model" placeholder="如：glm-4-flash / deepseek-chat / gpt-4o-mini">
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" data-close="aiConfigModal">取消</button>
+      <button class="btn btn-primary" id="saveAiConfigBtn">💾 保存配置</button>
     </div>
   </div>
 </div>
@@ -688,7 +717,11 @@
 
     <div class="form-row">
       <label>菜名 *</label>
-      <input class="input" id="f_name" placeholder="如：酸辣土豆丝">
+      <div style="display:flex; gap:8px;">
+        <input class="input" id="f_name" placeholder="如：酸辣土豆丝" style="flex:1;">
+        <button class="btn btn-primary" id="autoMatchBtn" type="button" style="white-space:nowrap;">🪄 AI 匹配</button>
+      </div>
+      <div class="hint" id="aiHint" style="margin-top:6px;">输入菜名后点击「AI 匹配」，自动填充大类/小类/食材/做法</div>
     </div>
 
     <div class="form-row" style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">
@@ -772,6 +805,94 @@ function saveDB() {
 function resetDB() {
   DB = JSON.parse(JSON.stringify(DEFAULT_DB));
   saveDB();
+}
+
+/* =========================================================
+ *  AI 配置（OpenAI 兼容格式）
+ * ========================================================= */
+const AI_KEY = 'caipu_ai_config_v1';
+function loadAIConfig() {
+  try {
+    const raw = localStorage.getItem(AI_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch(e) {}
+  return { baseUrl: '', apiKey: '', model: '' };
+}
+function saveAIConfig(cfg) {
+  localStorage.setItem(AI_KEY, JSON.stringify(cfg));
+}
+
+/* =========================================================
+ *  本地兜底匹配（无 AI 时基于菜名关键词）
+ * ========================================================= */
+const LOCAL_KW = {
+  // 荤菜
+  '鸡肉': ['鸡','鸡翅','鸡腿','鸡胸','鸡丁','辣子鸡','黄焖鸡','可乐鸡'],
+  '猪肉': ['排骨','五花','里脊','猪肉','肉丝','回锅','木须','京酱','蒜苔','豆角焖'],
+  '牛肉': ['牛','牛腩','牛柳','牛肉','葱爆牛'],
+  '鱼肉': ['鱼','鲈鱼','鲫鱼','三文鱼','酸菜鱼','水煮鱼','鲫鱼汤'],
+  '海鲜': ['虾','扇贝','花蛤','蟹','鱿鱼','蛤'],
+  // 素菜
+  '绿叶菜': ['菠菜','油麦','娃娃菜','空心菜','生菜','菜心','小白菜'],
+  '瓜果类': ['黄瓜','冬瓜','丝瓜','苦瓜','海带'],
+  '根茎类': ['土豆','白菜','山药','藕','萝卜','胡萝卜'],
+  '菌菇类': ['香菇','西兰花','杏鲍菇','蘑菇','什锦','芦笋'],
+  '豆制品': ['豆腐','千张','豆制品','蛋','炒蛋','蒸蛋','荷包蛋'],
+  '茄果类': ['茄子','青椒','秋葵','彩椒','豆角','四季豆']
+};
+function localMatch(name) {
+  // 蛋类单独判定：含"蛋"且无明显肉料 → 豆制品(素)
+  const isEgg = /蛋|炒蛋|蒸蛋|荷包蛋/.test(name) && !/肉|鸡|鱼|虾|牛|猪/.test(name);
+  if (isEgg) return { type:'veg', category:'豆制品', lowFat:true, singleUse:false };
+  // 查找关键词匹配
+  for (const [cat, kws] of Object.entries(LOCAL_KW)) {
+    if (kws.some(k => name.includes(k))) {
+      const isMeat = ['鸡肉','猪肉','牛肉','鱼肉','海鲜'].includes(cat);
+      return { type: isMeat ? 'meat' : 'veg', category: cat, lowFat: false, singleUse: cat === '鱼肉' };
+    }
+  }
+  return null;
+}
+
+/* =========================================================
+ *  AI 自动匹配
+ * ========================================================= */
+async function callAI(name) {
+  const cfg = loadAIConfig();
+  if (!cfg.apiKey || !cfg.baseUrl) {
+    // 无 AI 配置 → 走本地兜底
+    const m = localMatch(name);
+    if (!m) return { ok:false, error:'未匹配到品类，请手动填写或配置 AI 接口' };
+    return { ok:true, data: { ...m, ingredients:[], steps:[] }, local:true };
+  }
+  const url = cfg.baseUrl.replace(/\/$/, '') + '/chat/completions';
+  const sys = `你是家常菜谱分析助手。根据菜名返回 JSON，字段：type(meat/veg)、category(品类)、lowFat(bool)、singleUse(bool,鱼类true)、ingredients(数组,每项"食材 分量")、steps(数组,每步一字符串)。品类限定：荤=[鸡肉,猪肉,牛肉,鱼肉,海鲜,蛋/豆制品]；素=[绿叶菜,瓜果类,根茎类,菌菇类,豆制品,茄果类]。只返回JSON,不要多余文字。`;
+  const resp = await fetch(url, {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json', 'Authorization':`Bearer ${cfg.apiKey}` },
+    body: JSON.stringify({
+      model: cfg.model || 'glm-4-flash',
+      messages:[
+        { role:'system', content: sys },
+        { role:'user', content: `菜名：${name}` }
+      ],
+      temperature: 0.3
+    })
+  });
+  if (!resp.ok) {
+    const t = await resp.text().catch(()=> '');
+    return { ok:false, error:`AI 接口错误 (${resp.status})：${t.slice(0,200)}` };
+  }
+  const j = await resp.json();
+  const txt = j.choices?.[0]?.message?.content || '';
+  const m = txt.match(/\{[\s\S]*\}/);
+  if (!m) return { ok:false, error:'AI 返回格式异常，请重试或手动填写' };
+  try {
+    const data = JSON.parse(m[0]);
+    return { ok:true, data };
+  } catch(e) {
+    return { ok:false, error:'AI 返回 JSON 解析失败' };
+  }
 }
 
 const MEAT_CATS = ["鸡肉","猪肉","牛肉","鱼肉","海鲜","蛋/豆制品"];
@@ -1312,6 +1433,65 @@ function openEdit(type, idx) {
 }
 document.getElementById('addDishBtn').addEventListener('click', () => openEdit(null, null));
 
+/* ===== AI 配置弹窗 ===== */
+document.getElementById('aiConfigBtn').addEventListener('click', () => {
+  const cfg = loadAIConfig();
+  document.getElementById('ai_baseUrl').value = cfg.baseUrl || '';
+  document.getElementById('ai_apiKey').value = cfg.apiKey || '';
+  document.getElementById('ai_model').value = cfg.model || '';
+  openModal('aiConfigModal');
+});
+document.getElementById('saveAiConfigBtn').addEventListener('click', () => {
+  const cfg = {
+    baseUrl: document.getElementById('ai_baseUrl').value.trim(),
+    apiKey: document.getElementById('ai_apiKey').value.trim(),
+    model: document.getElementById('ai_model').value.trim()
+  };
+  saveAIConfig(cfg);
+  closeModal('aiConfigModal');
+  toast(cfg.apiKey ? 'AI 配置已保存' : '已清空 AI 配置（将使用本地匹配）', 'success');
+});
+
+/* ===== 自动匹配按钮 ===== */
+document.getElementById('autoMatchBtn').addEventListener('click', async () => {
+  const name = document.getElementById('f_name').value.trim();
+  if (!name) { toast('请先输入菜名', 'error'); return; }
+  const btn = document.getElementById('autoMatchBtn');
+  const hint = document.getElementById('aiHint');
+  const oldText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ 匹配中...';
+  hint.textContent = '正在分析菜名，请稍候...';
+  try {
+    const r = await callAI(name);
+    if (!r.ok) {
+      hint.innerHTML = `<span style="color:#c0392b;">❌ ${r.error}</span>`;
+      toast(r.error, 'error');
+    } else {
+      const d = r.data;
+      if (d.type) document.getElementById('f_type').value = d.type;
+      refreshEditCatSelect();
+      if (d.category) document.getElementById('f_category').value = d.category;
+      if (typeof d.lowFat === 'boolean') document.getElementById('f_lowFat').checked = d.lowFat;
+      if (Array.isArray(d.ingredients) && d.ingredients.length) {
+        document.getElementById('f_ingredients').value = d.ingredients.join('\n');
+      }
+      if (Array.isArray(d.steps) && d.steps.length) {
+        document.getElementById('f_steps').value = d.steps.join('\n');
+      }
+      hint.innerHTML = r.local
+        ? `<span style="color:#27ae60;">✅ 本地匹配：${d.type === 'meat' ? '荤菜' : '素菜'} · ${d.category}${d.singleUse ? '（单次）' : ''}</span>，食材/做法请手动补充`
+        : `<span style="color:#27ae60;">✅ AI 匹配完成，已自动填充所有字段</span>`;
+      toast('匹配完成', 'success');
+    }
+  } catch(e) {
+    hint.innerHTML = `<span style="color:#c0392b;">❌ 请求失败：${e.message}</span>`;
+    toast('请求失败：' + e.message, 'error');
+  }
+  btn.disabled = false;
+  btn.textContent = oldText;
+});
+
 document.getElementById('saveDishBtn').addEventListener('click', () => {
   const name = document.getElementById('f_name').value.trim();
   const type = document.getElementById('f_type').value;
@@ -1359,20 +1539,9 @@ function askDelete(type, idx) {
   if (!d) return;
   deletePending = {type, idx};
   document.getElementById('confirmMsg').innerHTML =
-    `确定要删除 <strong style="color:#c0392b;">${d.name}</strong>（${type === 'meat' ? '荤菜' : '素菜'} · ${d.category}）吗？<br>此操作不可恢复。`;
+    `确定要删除 <strong style="color:#c0392b;">${d.name}</strong>（${type === 'meat' ? '荤菜' : '素菜'} · ${d.category}）吗？<br>此操作不可恢复，删除后立即从本地数据库移除。`;
   openModal('confirmModal');
 }
-document.getElementById('confirmOkBtn').addEventListener('click', () => {
-  if (!deletePending) return;
-  const {type, idx} = deletePending;
-  const d = DB[type].splice(idx, 1)[0];
-  saveDB();
-  deletePending = null;
-  closeModal('confirmModal');
-  toast(`已删除「${d?.name || ''}」`, 'success');
-  renderManageGrid();
-  updateHint();
-});
 
 /* =========================================================
  *  恢复默认库
@@ -1384,10 +1553,10 @@ document.getElementById('resetDBBtn').addEventListener('click', () => {
   deletePending = 'RESET_DB';
   openModal('confirmModal');
 });
-// 改写 confirmOk 支持重置
-const oldConfirmOk = document.getElementById('confirmOkBtn');
-oldConfirmOk.replaceWith(oldConfirmOk.cloneNode(true));
+
+// 统一的确认按钮处理（删除 / 恢复默认）
 document.getElementById('confirmOkBtn').addEventListener('click', () => {
+  if (!deletePending) return;
   if (deletePending === 'RESET_DB') {
     resetDB();
     deletePending = null;
@@ -1399,13 +1568,13 @@ document.getElementById('confirmOkBtn').addEventListener('click', () => {
     state.meatResult = null; state.vegResult = null;
     displayDish('meat', null); displayDish('veg', null);
     updateConfirmBtn();
-  } else if (deletePending) {
+  } else {
     const {type, idx} = deletePending;
     const d = DB[type].splice(idx, 1)[0];
-    saveDB();
+    saveDB();  // 立即写入 localStorage
     deletePending = null;
     closeModal('confirmModal');
-    toast(`已删除「${d?.name || ''}」`, 'success');
+    toast(`已从数据库删除「${d?.name || ''}」`, 'success');
     renderManageGrid();
     updateHint();
   }

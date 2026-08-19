@@ -75,10 +75,27 @@
 
 ```
 menu/
-├── index.html   # 网页主体（HTML + CSS + JS 逻辑）
-├── data.js      # 菜谱数据层（DEFAULT_DB，79道家常菜，可单独维护）
+├── index.html             # 网页主体（HTML + CSS + JS 逻辑）
+├── data.js                # 菜谱数据层（DEFAULT_DB，79道家常菜，可单独维护）
+├── ai-config.example.js   # AI 接口配置模板（参考用，可上传）
+├── ai-config.js           # AI 接口配置实际文件（⚠️ 本地保存，.gitignore 忽略）
+├── .gitignore             # Git 忽略规则（含 ai-config.js）
 └── README.md
 ```
+
+### 🔐 AI 接口配置（可选）
+
+如需使用「AI 匹配」功能，需配置兼容 OpenAI 格式的 API：
+
+1. 在「菜谱维护」页点 **「⚙️ AI 接口配置」**
+2. 填入 API 地址、Key、模型名（如智谱 `https://open.bigmodel.cn/api/paas/v4` + `glm-4-flash`）
+3. 点 **「⬇️ 下载配置文件」**，将下载的 `ai-config.js` 放到项目根目录
+4. 刷新网页，配置自动生效
+
+**安全性**：
+- API Key 存在本地 `ai-config.js` 文件中，**不进浏览器 localStorage**
+- `ai-config.js` 已在 `.gitignore` 中，**不会上传到 Git 仓库**
+- 如未配置 AI，自动降级为本地关键词匹配（仅判断荤素/品类，不填食材/做法）
 
 ---
 

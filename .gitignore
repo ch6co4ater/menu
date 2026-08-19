@@ -1,0 +1,16 @@
+# AI 接口配置文件（含 API Key，禁止上传）
+ai-config.js
+
+# 临时脚本
+_split.js
+_verify.js
+
+# 日志
+debug.log
+*.log
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

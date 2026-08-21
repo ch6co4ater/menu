@@ -656,8 +656,7 @@
       </div>
       <div style="display:flex; justify-content:flex-end; margin-top:10px; flex-wrap:wrap; gap:8px;">
         <button class="btn btn-ghost btn-sm" id="aiConfigBtn">⚙️ AI 接口配置</button>
-        <button class="btn btn-ghost btn-sm" id="linkFileBtn">📁 关联 data.js</button>
-        <button class="btn btn-ghost btn-sm" id="downloadDataBtn">⬇️ 下载 data.js</button>
+        <button class="btn btn-ghost btn-sm" id="downloadDataBtn">⬇️ 下载备份</button>
       </div>
     </div>
   </div>
@@ -790,155 +789,151 @@
 <div class="toast" id="toast"></div>
 
 <script src="data.js"></script>
-<script src="ai-config.js" onerror="console.log('[AI] 未找到 ai-config.js，使用本地兜底匹配')"></script>
+<script src="ai-config.js" onerror="console.log('[Config] 未找到 ai-config.js，使用默认配置')"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 
 /* =========================================================
- *  数据层（直接读写 data.js 文件，不使用 localStorage）
- *  首次点「关联 data.js」授权一次，之后打开页面自动恢复关联
+ *  数据层（Supabase 云数据库 + 本地 DEFAULT_DB 兜底）
  * ========================================================= */
-let DB = JSON.parse(JSON.stringify(DEFAULT_DB));   // 内存中的菜谱数据
-let editingId = null;
-let dbFileHandle = null;                           // File System Access API 文件句柄
+let DB = { meat: [], veg: [] };     // 内存中的菜谱数据
+let editingId = null;               // 当前编辑的菜 {type, idx, rowId?}
+let supabaseClient = null;         // Supabase 客户端
+let useSupabase = false;           // 是否已连接 Supabase
 
-/* 是否支持 File System Access API */
-function isFileAPISupported() {
-  return typeof window.showOpenFilePicker === 'function';
-}
-
-/* ----- IndexedDB 存取 FileHandle（持久化文件关联，免重复选择）----- */
-const IDB_NAME = 'caipu_file', IDB_STORE = 'handles';
-function idbGet(key) {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(IDB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
-    req.onsuccess = () => {
-      const tx = req.result.transaction(IDB_STORE, 'readonly');
-      const r = tx.objectStore(IDB_STORE).get(key);
-      r.onsuccess = () => resolve(r.result);
-      r.onerror = () => reject(r.error);
-    };
-    req.onerror = () => reject(req.error);
-  });
-}
-function idbSet(key, value) {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(IDB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
-    req.onsuccess = () => {
-      const tx = req.result.transaction(IDB_STORE, 'readwrite');
-      const r = tx.objectStore(IDB_STORE).put(value, key);
-      r.onsuccess = () => resolve();
-      r.onerror = () => reject(r.error);
-    };
-    req.onerror = () => reject(req.error);
-  });
-}
-
-/* 页面加载时自动恢复文件关联（授权一次后免重复选择）*/
-async function autoRestoreFile() {
-  if (!isFileAPISupported()) { updateFileStatus(); return; }
-  try {
-    const handle = await idbGet('dataFile');
-    if (!handle) { updateFileStatus(); return; }
-    // 验证/请求读写权限
-    let perm = await handle.queryPermission({ mode: 'readwrite' });
-    if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'readwrite' });
-    if (perm === 'granted') {
-      dbFileHandle = handle;
-      await reloadFromFile();
-      updateFileStatus();
-      console.log('[DB] 已自动关联 data.js');
-    } else {
-      updateFileStatus();  // 权限未授予，需手动点关联
-    }
-  } catch(e) {
-    console.log('[DB] 自动恢复失败：', e.message);
-    updateFileStatus();
-  }
-}
-
-/* 关联 data.js 文件，后续增删改自动写入 */
-async function linkDataFile() {
-  if (!isFileAPISupported()) {
-    toast('当前浏览器不支持文件关联（需 Chrome/Edge 86+），请使用「下载 data.js」', 'error');
-    return;
-  }
-  try {
-    const [handle] = await window.showOpenFilePicker({
-      types: [{ description: 'JavaScript', accept: { 'application/javascript': ['.js'] } }]
-    });
-    dbFileHandle = handle;
-    await idbSet('dataFile', handle);   // 持久化到 IndexedDB，下次自动恢复
-    await reloadFromFile();
-    updateFileStatus();
-    toast(`已关联 ${handle.name}，之后打开页面会自动恢复`, 'success');
-  } catch(e) {
-    if (e.name !== 'AbortError') toast('关联失败：' + e.message, 'error');
-  }
-}
-
-/* 从关联的文件重新加载数据 */
-async function reloadFromFile() {
-  if (!dbFileHandle) return;
-  const file = await dbFileHandle.getFile();
-  const text = await file.text();
-  const m = text.match(/DEFAULT_DB\s*=\s*(\{[\s\S]*\})\s*;?\s*$/);
-  if (m) {
+/* 初始化 Supabase 客户端 */
+function initSupabase() {
+  const cfg = loadAIConfig();
+  if (cfg.supabaseUrl && cfg.supabaseKey && window.supabase) {
     try {
-      DB = JSON.parse(m[1]);
-      refreshCategorySelect();
-      renderManageGrid();
-      updateHint();
+      supabaseClient = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseKey);
+      useSupabase = true;
+      console.log('[DB] Supabase 已启用');
+      return true;
     } catch(e) {
-      toast('文件 JSON 解析失败：' + e.message, 'error');
+      console.error('[DB] Supabase 初始化失败:', e);
     }
   }
+  return false;
 }
 
-/* 写入 data.js 文件（异步，不阻塞 UI）*/
-async function saveDB() {
-  if (!dbFileHandle) return;  // 未关联文件，只在内存中修改
-  try {
-    const writable = await dbFileHandle.createWritable();
-    await writable.write(generateDataJsContent());
-    await writable.close();
-  } catch(e) {
-    toast('写入文件失败：' + e.message, 'error');
+/* 从 Supabase 加载所有菜谱 */
+async function loadFromSupabase() {
+  if (!useSupabase) return null;
+  const { data, error } = await supabaseClient.from('dishes').select('*').order('id');
+  if (error) {
+    console.error('[DB] 加载失败:', error);
+    return null;
+  }
+  const db = { meat: [], veg: [] };
+  (data || []).forEach(row => {
+    if (!db[row.type]) return;
+    db[row.type].push({
+      _id: row.id,
+      name: row.name,
+      category: row.category,
+      lowFat: !!row.lowFat,
+      singleUse: !!row.singleUse,
+      ingredients: Array.isArray(row.ingredients) ? row.ingredients : (row.ingredients ? JSON.parse(row.ingredients) : []),
+      steps: Array.isArray(row.steps) ? row.steps : (row.steps ? JSON.parse(row.steps) : [])
+    });
+  });
+  return db;
+}
+
+/* 首次初始化：如果 Supabase 表为空，自动导入 DEFAULT_DB */
+async function seedIfEmpty() {
+  if (!useSupabase) return;
+  const { count, error } = await supabaseClient.from('dishes').select('id', { count: 'exact', head: true });
+  if (error) { console.error('[DB] 检查数据量失败:', error); return; }
+  if (count > 0) return;
+  // 导入 DEFAULT_DB
+  const rows = [];
+  ['meat', 'veg'].forEach(type => {
+    DEFAULT_DB[type].forEach(d => {
+      rows.push({
+        type, name: d.name, category: d.category,
+        lowFat: !!d.lowFat, singleUse: !!d.singleUse,
+        ingredients: JSON.stringify(d.ingredients || []),
+        steps: JSON.stringify(d.steps || [])
+      });
+    });
+  });
+  const { error: insertErr } = await supabaseClient.from('dishes').insert(rows);
+  if (insertErr) {
+    console.error('[DB] 初始化导入失败:', insertErr);
+    toast('菜谱初始化导入失败：' + insertErr.message, 'error');
+  } else {
+    toast(`已导入 ${rows.length} 道默认菜谱`, 'success');
   }
 }
 
-/* 生成 data.js 文件内容 */
-function generateDataJsContent() {
-  return `/* 菜谱数据 - 由菜谱应用自动生成 */\n` +
-         `/* 字段：name(菜名) category(品类) lowFat(减脂) singleUse(单次,鱼类true) ingredients(食材) steps(做法) */\n` +
-         `const DEFAULT_DB = ${JSON.stringify(DB, null, 2)};\n`;
+/* 加载菜谱到内存 */
+async function loadDB() {
+  if (useSupabase) {
+    const db = await loadFromSupabase();
+    if (db) {
+      DB = db;
+      return;
+    }
+  }
+  // 降级：用 DEFAULT_DB
+  DB = JSON.parse(JSON.stringify(DEFAULT_DB));
 }
 
-/* 下载 data.js（降级方案）*/
-function downloadDataJs() {
-  const blob = new Blob([generateDataJsContent()], { type: 'application/javascript' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'data.js';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-  toast('已下载 data.js，请替换项目目录中的文件后刷新', 'success');
+/* 保存（Supabase 模式下不需要批量保存，每个操作直接调 API）*/
+async function saveDB() {
+  // Supabase 模式：CRUD 各自直接调用，无需批量保存
+  // 仅在非 Supabase 模式下需要，但当前已弃用本地存储，所以这里不做操作
+}
+
+/* ============ CRUD ============ */
+/* 新增 */
+async function dbInsert(type, dish) {
+  if (!useSupabase) return;
+  const { error } = await supabaseClient.from('dishes').insert({
+    type, name: dish.name, category: dish.category,
+    lowFat: !!dish.lowFat, singleUse: !!dish.singleUse,
+    ingredients: dish.ingredients || [], steps: dish.steps || []
+  });
+  if (error) toast('新增失败：' + error.message, 'error');
+}
+
+/* 修改 */
+async function dbUpdate(rowId, type, dish) {
+  if (!useSupabase || !rowId) return;
+  const { error } = await supabaseClient.from('dishes').update({
+    type, name: dish.name, category: dish.category,
+    lowFat: !!dish.lowFat, singleUse: !!dish.singleUse,
+    ingredients: dish.ingredients || [], steps: dish.steps || []
+  }).eq('id', rowId);
+  if (error) toast('修改失败：' + error.message, 'error');
+}
+
+/* 删除 */
+async function dbDelete(rowId) {
+  if (!useSupabase || !rowId) return;
+  const { error } = await supabaseClient.from('dishes').delete().eq('id', rowId);
+  if (error) toast('删除失败：' + error.message, 'error');
+}
+
+/* 恢复默认（清表后重新导入）*/
+async function dbReset() {
+  if (!useSupabase) return false;
+  const { error: delErr } = await supabaseClient.from('dishes').delete().neq('id', 0);
+  if (delErr) { toast('清空失败：' + delErr.message, 'error'); return false; }
+  await seedIfEmpty();
+  return true;
 }
 
 /* 更新文件状态显示 */
 function updateFileStatus() {
   const el = document.getElementById('fileStatus');
   if (!el) return;
-  if (dbFileHandle) {
-    el.innerHTML = `<span style="color:#27ae60;">📁 已自动关联 ${dbFileHandle.name}</span>　增删改自动写入文件`;
-  } else if (isFileAPISupported()) {
-    el.innerHTML = `<span style="color:#8b6914;">⚠️ 首次使用请点「关联 data.js」授权一次</span>　之后打开页面自动恢复`;
+  if (useSupabase) {
+    el.innerHTML = `<span style="color:#27ae60;">☁️ 已连接 Supabase 云数据库</span>　增删改自动同步`;
   } else {
-    el.innerHTML = `<span style="color:#8b6914;">⚠️ 浏览器不支持文件关联</span>　修改后请点「下载 data.js」`;
+    el.innerHTML = `<span style="color:#8b6914;">⚠️ 未连接 Supabase</span>　请在 ai-config.js 中配置 supabaseUrl 和 supabaseKey`;
   }
 }
 
@@ -1637,11 +1632,12 @@ document.getElementById('autoMatchBtn').addEventListener('click', async () => {
   btn.textContent = oldText;
 });
 
-document.getElementById('saveDishBtn').addEventListener('click', () => {
+document.getElementById('saveDishBtn').addEventListener('click', async () => {
   const name = document.getElementById('f_name').value.trim();
   const type = document.getElementById('f_type').value;
   const category = document.getElementById('f_category').value;
   const lowFat = document.getElementById('f_lowFat').checked;
+  const singleUse = document.getElementById('f_singleUse')?.checked || false;
   const ingredients = parseLines(document.getElementById('f_ingredients').value);
   const steps = parseLines(document.getElementById('f_steps').value);
 
@@ -1650,23 +1646,26 @@ document.getElementById('saveDishBtn').addEventListener('click', () => {
   if (ingredients.length === 0) return toast('请填写至少一项食材', 'error');
   if (steps.length === 0) return toast('请填写至少一步做法', 'error');
 
-  const dish = { name, category, lowFat, ingredients, steps };
+  const dish = { name, category, lowFat, singleUse, ingredients, steps };
   if (editingId) {
-    // 若大类改变，需要从原数组移到新数组
-    const fromArr = DB[editingId.type];
+    // 编辑：调用 Supabase update
     if (editingId.type === type) {
-      fromArr[editingId.idx] = dish;
+      DB[editingId.type][editingId.idx] = { ...DB[editingId.type][editingId.idx], ...dish };
     } else {
-      fromArr.splice(editingId.idx, 1);
+      // 大类改变，先删原位置再插入新位置（内存）
+      DB[editingId.type].splice(editingId.idx, 1);
       DB[type].push(dish);
     }
+    await dbUpdate(editingId._id, type, dish);
     toast('已修改', 'success');
   } else {
+    // 新增：调用 Supabase insert
     DB[type].push(dish);
+    await dbInsert(type, dish);
     toast('已新增', 'success');
   }
-  saveDB();
   closeModal('editModal');
+  await loadDB();            // 从 Supabase 重新加载，保持同步
   renderManageGrid();
   updateHint();
   // 重置随机结果
@@ -1682,17 +1681,18 @@ let deletePending = null;
 function askDelete(type, idx) {
   const d = DB[type][idx];
   if (!d) return;
-  deletePending = {type, idx};
+  deletePending = {type, idx, rowId: d._id};
   document.getElementById('confirmMsg').innerHTML =
-    `确定要删除 <strong style="color:#c0392b;">${d.name}</strong>（${type === 'meat' ? '荤菜' : '素菜'} · ${d.category}）吗？<br>删除后将自动从 data.js 文件移除。`;
+    `确定要删除 <strong style="color:#c0392b;">${d.name}</strong>（${type === 'meat' ? '荤菜' : '素菜'} · ${d.category}）吗？<br>删除后将从 Supabase 数据库永久移除。`;
   openModal('confirmModal');
 }
 
-document.getElementById('confirmOkBtn').addEventListener('click', () => {
+document.getElementById('confirmOkBtn').addEventListener('click', async () => {
   if (!deletePending) return;
-  const {type, idx} = deletePending;
-  const d = DB[type].splice(idx, 1)[0];
-  saveDB();  // 自动写入 data.js
+  const {type, idx, rowId} = deletePending;
+  const d = DB[type][idx];
+  DB[type].splice(idx, 1);
+  await dbDelete(rowId);
   deletePending = null;
   closeModal('confirmModal');
   toast(`已删除「${d?.name || ''}」`, 'success');
@@ -1701,10 +1701,21 @@ document.getElementById('confirmOkBtn').addEventListener('click', () => {
 });
 
 /* =========================================================
- *  文件关联 / 下载
+ *  备份下载（在 Supabase 模式下作为数据导出）
  * ========================================================= */
-document.getElementById('linkFileBtn').addEventListener('click', linkDataFile);
-document.getElementById('downloadDataBtn').addEventListener('click', downloadDataJs);
+document.getElementById('downloadDataBtn').addEventListener('click', () => {
+  const content = `/* 菜谱数据备份 - ${new Date().toLocaleString('zh-CN')} */\nconst DEFAULT_DB = ${JSON.stringify({meat: DB.meat.map(({_id, ...d})=>d), veg: DB.veg.map(({_id, ...d})=>d)}, null, 2)};\n`;
+  const blob = new Blob([content], { type: 'application/javascript' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `data-backup-${Date.now()}.js`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast('已下载菜谱备份', 'success');
+});
 
 /* =========================================================
  *  Modal 通用开关
@@ -1751,8 +1762,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
   refreshCategorySelect(); // 维护页 select
   updateHint();
-  updateFileStatus();      // 显示文件关联状态
-  autoRestoreFile();       // 尝试自动恢复之前关联的 data.js
+
+  // 初始化 Supabase + 加载数据
+  (async () => {
+    initSupabase();
+    updateFileStatus();
+    if (useSupabase) {
+      await seedIfEmpty();   // 首次自动导入默认菜谱
+      await loadDB();        // 从 Supabase 加载
+    } else {
+      DB = JSON.parse(JSON.stringify(DEFAULT_DB));
+    }
+    refreshCategorySelect();
+    renderManageGrid();
+    updateHint();
+  })();
 });
 </script>
 </body>

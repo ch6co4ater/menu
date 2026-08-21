@@ -83,19 +83,41 @@ menu/
 └── README.md
 ```
 
-### 🔐 AI 接口配置（可选）
+### 🔐 配置（AI 接口 + Supabase 数据库）
 
-如需使用「AI 匹配」功能，需配置兼容 OpenAI 格式的 API：
+所有配置存在本地 `ai-config.js` 文件中（已在 `.gitignore`，不会上传 Git）。
 
-1. 在「菜谱维护」页点 **「⚙️ AI 接口配置」**
-2. 填入 API 地址、Key、模型名（如智谱 `https://open.bigmodel.cn/api/paas/v4` + `glm-4-flash`）
-3. 点 **「⬇️ 下载配置文件」**，将下载的 `ai-config.js` 放到项目根目录
-4. 刷新网页，配置自动生效
+#### 1. Supabase 数据库（必选，用于菜谱增删改查）
+
+1. 创建 Supabase 项目 → [supabase.com](https://supabase.com)
+2. 在 **SQL Editor** 执行 [supabase-schema.sql](supabase-schema.sql)（建表 + 权限）
+3. 在 **Settings → API** 复制 `Project URL` 和 `anon public` key
+4. 复制 `ai-config.example.js` 为 `ai-config.js`，填入 `supabaseUrl` 和 `supabaseKey`
+5. 刷新网页，首次加载自动导入 79 道默认菜谱
+
+#### 2. AI 接口（可选，用于「AI 匹配」自动填充菜谱）
+
+在 `ai-config.js` 中填入兼容 OpenAI 格式的 API（智谱 GLM / DeepSeek / OpenAI 等）。
 
 **安全性**：
-- API Key 存在本地 `ai-config.js` 文件中，**不进浏览器 localStorage**
-- `ai-config.js` 已在 `.gitignore` 中，**不会上传到 Git 仓库**
-- 如未配置 AI，自动降级为本地关键词匹配（仅判断荤素/品类，不填食材/做法）
+- Supabase anon key 设计为公开（受 RLS 保护），但仍存在本地文件，不上传 Git
+- AI API Key 完全本地，不进 localStorage
+- 如未配置 AI，自动降级为本地关键词匹配
+
+---
+
+## 📁 项目结构
+
+```
+menu/
+├── index.html             # 网页主体（HTML + CSS + JS 逻辑）
+├── data.js                # 菜谱数据层（DEFAULT_DB，79道家常菜，首次导入用）
+├── ai-config.example.js   # 配置模板（AI + Supabase，可上传）
+├── ai-config.js           # 实际配置（⚠️ 本地保存，.gitignore 忽略）
+├── supabase-schema.sql    # Supabase 建表 SQL
+├── .gitignore             # Git 忽略规则
+└── README.md
+```
 
 ---
 
@@ -103,4 +125,5 @@ menu/
 
 - 至少需 3 荤 3 素才能生成一周菜谱，筛选太严会提示调整
 - 换菜时只会换成与当前不同的菜（避免随机出同一道）
-- 想重置所有自定义改动，到「菜谱维护」点底部「恢复默认菜谱库」即可
+- 菜谱增删改直接写入 Supabase，刷新页面数据保持一致
+- 点「⬇️ 下载备份」可导出当前菜谱为 JS 文件备份

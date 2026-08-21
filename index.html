@@ -1675,33 +1675,43 @@ document.getElementById('autoMatchBtn').addEventListener('click', async () => {
  * ========================================================= */
 let pendingDish = null;   // 待确认保存的菜谱数据
 
-// 菜名相似度检测：包含关系 或 编辑距离 ≤ 2
+// 菜名相似度检测：
+//   1) 包含关系（如「番茄炒蛋」与「炒蛋」）
+//   2) 字符集合相似度（共同字符数 / 较短菜名长度 ≥ 阈值）
+//   3) 编辑距离 = 1（仅 1 字差异，如「番茄炒蛋」vs「番茄鸡蛋」）
+// 注：不再用编辑距离 ≤ 2 判定 —— 「柠檬虾」与「白灼虾」编辑距离=2 但完全是两道菜
 function findSimilarNames(name, type) {
   const target = name.trim().toLowerCase();
   if (!target) return [];
   const similar = [];
+  const targetChars = new Set(target);
   DB[type].forEach(d => {
     const curr = (d.name || '').trim().toLowerCase();
-    if (!curr || curr === target) return;   // 完全相同在前面单独拦截
-    // 1. 包含关系（如「番茄炒蛋」与「炒蛋」）
+    if (!curr || curr === target) return;
+    // 1. 包含关系
     if (curr.includes(target) || target.includes(curr)) {
       similar.push(d.name); return;
     }
-    // 2. 编辑距离 ≤ 2（允许插入/删除/替换 1~2 个字符）
-    if (Math.abs(curr.length - target.length) > 2) return;
+    // 2. 字符集合相似度
+    const currChars = new Set(curr);
+    let common = 0;
+    targetChars.forEach(c => { if (currChars.has(c)) common++; });
+    const minLen = Math.min(target.length, curr.length);
+    // 短菜名（≤3字）阈值更高，避免「柠檬虾 / 白灼虾」误判
+    const threshold = minLen <= 3 ? 0.667 : 0.5;
+    if (common >= 2 && common / minLen >= threshold) {
+      similar.push(d.name); return;
+    }
+    // 3. 编辑距离 = 1（仅允许 1 字差异）
+    if (Math.abs(curr.length - target.length) > 1) return;
     let diff = 0;
     const len = Math.max(curr.length, target.length);
-    for (let i = 0, j = 0; i < len || j < len;) {
-      const a = curr[i] || '';
-      const b = target[j] || '';
-      if (a === b) { i++; j++; continue; }
-      // 尝试跳跃匹配，判断插入或删除
-      if (curr[i + 1] === target[j]) { i++; diff++; }
-      else if (curr[i] === target[j + 1]) { j++; diff++; }
-      else { i++; j++; diff++; }
-      if (diff > 2) return;
+    for (let i = 0; i < len; i++) {
+      if ((curr[i] || '') !== (target[i] || '')) {
+        if (++diff > 1) break;
+      }
     }
-    if (diff <= 2) similar.push(d.name);
+    if (diff <= 1) similar.push(d.name);
   });
   return similar;
 }

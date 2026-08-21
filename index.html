@@ -1615,6 +1615,27 @@ document.getElementById('autoMatchBtn').addEventListener('click', async () => {
   if (!name) { toast('请先输入菜名', 'error'); return; }
   const btn = document.getElementById('autoMatchBtn');
   const hint = document.getElementById('aiHint');
+
+  // 新增模式下先查重，避免浪费 AI 算力
+  // 编辑模式跳过：菜名本就来自数据库，可能用户只是想重新匹配字段
+  if (!editingId) {
+    const type = document.getElementById('f_type').value;
+    // 1) 同名 —— 直接拦截
+    const exactHit = DB[type].find(d => (d.name || '').trim().toLowerCase() === name.toLowerCase());
+    if (exactHit) {
+      hint.innerHTML = `<span style="color:#c0392b;">❌ 已存在同名菜谱「${exactHit.name}」，无需 AI 匹配</span>`;
+      toast(`已存在同名菜谱：${exactHit.name}`, 'error');
+      return;
+    }
+    // 2) 相似 —— 同样拦截，提示用户确认是否真不一样
+    const similar = findSimilarNames(name, type);
+    if (similar.length > 0) {
+      hint.innerHTML = `<span style="color:#c0392b;">❌ 检测到相似菜名：${similar.join('、')}<br>如确为不同菜式，请改用更区分的菜名后再 AI 匹配</span>`;
+      toast(`检测到相似菜名，已拦截 AI 匹配`, 'error');
+      return;
+    }
+  }
+
   const oldText = btn.textContent;
   btn.disabled = true;
   btn.textContent = '⏳ 匹配中...';

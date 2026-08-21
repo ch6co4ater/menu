@@ -795,6 +795,7 @@
 
 /* =========================================================
  *  数据层（直接读写 data.js 文件，不使用 localStorage）
+ *  首次点「关联 data.js」授权一次，之后打开页面自动恢复关联
  * ========================================================= */
 let DB = JSON.parse(JSON.stringify(DEFAULT_DB));   // 内存中的菜谱数据
 let editingId = null;
@@ -803,6 +804,58 @@ let dbFileHandle = null;                           // File System Access API 文
 /* 是否支持 File System Access API */
 function isFileAPISupported() {
   return typeof window.showOpenFilePicker === 'function';
+}
+
+/* ----- IndexedDB 存取 FileHandle（持久化文件关联，免重复选择）----- */
+const IDB_NAME = 'caipu_file', IDB_STORE = 'handles';
+function idbGet(key) {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+    req.onsuccess = () => {
+      const tx = req.result.transaction(IDB_STORE, 'readonly');
+      const r = tx.objectStore(IDB_STORE).get(key);
+      r.onsuccess = () => resolve(r.result);
+      r.onerror = () => reject(r.error);
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+function idbSet(key, value) {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+    req.onsuccess = () => {
+      const tx = req.result.transaction(IDB_STORE, 'readwrite');
+      const r = tx.objectStore(IDB_STORE).put(value, key);
+      r.onsuccess = () => resolve();
+      r.onerror = () => reject(r.error);
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/* 页面加载时自动恢复文件关联（授权一次后免重复选择）*/
+async function autoRestoreFile() {
+  if (!isFileAPISupported()) { updateFileStatus(); return; }
+  try {
+    const handle = await idbGet('dataFile');
+    if (!handle) { updateFileStatus(); return; }
+    // 验证/请求读写权限
+    let perm = await handle.queryPermission({ mode: 'readwrite' });
+    if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'readwrite' });
+    if (perm === 'granted') {
+      dbFileHandle = handle;
+      await reloadFromFile();
+      updateFileStatus();
+      console.log('[DB] 已自动关联 data.js');
+    } else {
+      updateFileStatus();  // 权限未授予，需手动点关联
+    }
+  } catch(e) {
+    console.log('[DB] 自动恢复失败：', e.message);
+    updateFileStatus();
+  }
 }
 
 /* 关联 data.js 文件，后续增删改自动写入 */
@@ -816,9 +869,10 @@ async function linkDataFile() {
       types: [{ description: 'JavaScript', accept: { 'application/javascript': ['.js'] } }]
     });
     dbFileHandle = handle;
+    await idbSet('dataFile', handle);   // 持久化到 IndexedDB，下次自动恢复
     await reloadFromFile();
     updateFileStatus();
-    toast(`已关联 ${handle.name}，增删改将自动写入文件`, 'success');
+    toast(`已关联 ${handle.name}，之后打开页面会自动恢复`, 'success');
   } catch(e) {
     if (e.name !== 'AbortError') toast('关联失败：' + e.message, 'error');
   }
@@ -880,9 +934,9 @@ function updateFileStatus() {
   const el = document.getElementById('fileStatus');
   if (!el) return;
   if (dbFileHandle) {
-    el.innerHTML = `<span style="color:#27ae60;">📁 已关联 ${dbFileHandle.name}</span>　增删改自动写入`;
+    el.innerHTML = `<span style="color:#27ae60;">📁 已自动关联 ${dbFileHandle.name}</span>　增删改自动写入文件`;
   } else if (isFileAPISupported()) {
-    el.innerHTML = `<span style="color:#8b6914;">⚠️ 未关联文件</span>　点击「关联 data.js」后修改才会保存`;
+    el.innerHTML = `<span style="color:#8b6914;">⚠️ 首次使用请点「关联 data.js」授权一次</span>　之后打开页面自动恢复`;
   } else {
     el.innerHTML = `<span style="color:#8b6914;">⚠️ 浏览器不支持文件关联</span>　修改后请点「下载 data.js」`;
   }
@@ -1698,6 +1752,7 @@ document.addEventListener('DOMContentLoaded', () => {
   refreshCategorySelect(); // 维护页 select
   updateHint();
   updateFileStatus();      // 显示文件关联状态
+  autoRestoreFile();       // 尝试自动恢复之前关联的 data.js
 });
 </script>
 </body>

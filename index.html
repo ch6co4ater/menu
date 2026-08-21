@@ -1042,6 +1042,50 @@ async function callAI(name) {
   }
 }
 
+/* ===== AI 查重：判断输入菜名与已存在相似菜名是否是同一道菜 =====
+ * 设计原则：只发送候选菜名（通常 1-3 个），不发送全库，省 token
+ * 返回 { duplicate: bool, hitName?: string, error?: string }
+ */
+async function callAIDuplicate(name, similarList) {
+  const cfg = loadAIConfig();
+  // 无 AI 配置 → 降级为本地判断：只要存在相似就视为重复（保守拦截）
+  if (!cfg.apiKey || !cfg.baseUrl) {
+    return { duplicate: similarList.length > 0, hitName: similarList[0] };
+  }
+  const url = cfg.baseUrl.replace(/\/$/, '') + '/chat/completions';
+  // prompt 简短：明确判定标准，只返回 JSON
+  const sys = `你是菜名比对助手。判断"输入菜名"与"已存在菜名"是否是同一道菜。
+判定标准：主食材 + 核心做法相同才算同一道（如「西红柿炒鸡蛋」=「番茄炒蛋」）。
+仅做法或仅主食材不同则不算（如「柠檬虾」≠「油焖大虾」、「宫保鸡丁」≠「宫保虾丁」）。
+只返回 JSON：{"same":true/false,"hit":"匹配到的已存在菜名或空字符串"}。不要多余文字。`;
+  const resp = await fetch(url, {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json', 'Authorization':`Bearer ${cfg.apiKey}` },
+    body: JSON.stringify({
+      model: cfg.model || 'glm-4-flash',
+      messages:[
+        { role:'system', content: sys },
+        { role:'user', content: `输入菜名：${name}\n已存在菜名：${similarList.join('、')}` }
+      ],
+      temperature: 0
+    })
+  });
+  if (!resp.ok) {
+    const t = await resp.text().catch(()=> '');
+    return { duplicate:false, error:`AI 接口错误 (${resp.status})` };
+  }
+  const j = await resp.json();
+  const txt = j.choices?.[0]?.message?.content || '';
+  const m = txt.match(/\{[\s\S]*\}/);
+  if (!m) return { duplicate:false, error:'AI 返回格式异常' };
+  try {
+    const data = JSON.parse(m[0]);
+    return { duplicate: !!data.same, hitName: data.hit || '' };
+  } catch(e) {
+    return { duplicate:false, error:'AI 返回 JSON 解析失败' };
+  }
+}
+
 const MEAT_CATS = ["鸡肉","猪肉","牛肉","鱼肉","海鲜","蛋/豆制品"];
 const VEG_CATS = ["绿叶菜","瓜果类","根茎类","菌菇类","豆制品","茄果类"];
 
@@ -1615,28 +1659,54 @@ document.getElementById('autoMatchBtn').addEventListener('click', async () => {
   if (!name) { toast('请先输入菜名', 'error'); return; }
   const btn = document.getElementById('autoMatchBtn');
   const hint = document.getElementById('aiHint');
+  const oldText = btn.textContent;
 
   // 新增模式下先查重，避免浪费 AI 算力
   // 编辑模式跳过：菜名本就来自数据库，可能用户只是想重新匹配字段
   if (!editingId) {
     const type = document.getElementById('f_type').value;
-    // 1) 同名 —— 直接拦截
+    // 1) 同名 —— 直接拦截（不需要 AI 判断）
     const exactHit = DB[type].find(d => (d.name || '').trim().toLowerCase() === name.toLowerCase());
     if (exactHit) {
       hint.innerHTML = `<span style="color:#c0392b;">❌ 已存在同名菜谱「${exactHit.name}」，无需 AI 匹配</span>`;
       toast(`已存在同名菜谱：${exactHit.name}`, 'error');
       return;
     }
-    // 2) 相似 —— 同样拦截，提示用户确认是否真不一样
+    // 2) 相似 —— 让 AI 判断是否真的是同一道菜（只发候选菜名，不传全库）
     const similar = findSimilarNames(name, type);
     if (similar.length > 0) {
-      hint.innerHTML = `<span style="color:#c0392b;">❌ 检测到相似菜名：${similar.join('、')}<br>如确为不同菜式，请改用更区分的菜名后再 AI 匹配</span>`;
-      toast(`检测到相似菜名，已拦截 AI 匹配`, 'error');
-      return;
+      btn.disabled = true;
+      btn.textContent = '⏳ 查重中...';
+      hint.textContent = `检测到 ${similar.length} 个相似菜名，让 AI 判断是否同一道菜...`;
+      let isDup = false;
+      try {
+        const dup = await callAIDuplicate(name, similar);
+        if (dup.duplicate) {
+          const hitName = dup.hitName || similar[0];
+          hint.innerHTML = `<span style="color:#c0392b;">❌ AI 判定与已存在菜谱「${hitName}」是同一道菜，无需重复添加</span>`;
+          toast(`与「${hitName}」是同一道菜，已拦截`, 'error');
+          isDup = true;
+        } else if (dup.error) {
+          // AI 接口异常 → 降级为拦截，避免重复
+          hint.innerHTML = `<span style="color:#c0392b;">⚠️ AI 查重失败：${dup.error}，已拦截以防重复</span>`;
+          toast('AI 查重失败，已拦截', 'error');
+          isDup = true;
+        } else {
+          // AI 明确说不是同一道菜 → 继续走填充流程
+          hint.innerHTML = `<span style="color:#27ae60;">✅ AI 判定与相似菜名不是同一道菜，继续匹配...</span>`;
+        }
+      } catch(e) {
+        hint.innerHTML = `<span style="color:#c0392b;">⚠️ AI 查重异常：${e.message}，已拦截以防重复</span>`;
+        toast('AI 查重异常，已拦截', 'error');
+        isDup = true;
+      }
+      btn.disabled = false;
+      btn.textContent = oldText;
+      if (isDup) return;
     }
   }
 
-  const oldText = btn.textContent;
+  // 3) 通过查重 → 调 AI 填充字段
   btn.disabled = true;
   btn.textContent = '⏳ 匹配中...';
   hint.textContent = '正在分析菜名，请稍候...';

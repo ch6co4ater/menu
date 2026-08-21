@@ -786,6 +786,23 @@
   </div>
 </div>
 
+<!-- ============ 查重确认 ============ -->
+<div class="modal" id="duplicateModal">
+  <div class="modal-content" style="max-width:420px;">
+    <div class="modal-title">⚠️ 检测到相似菜名</div>
+    <p style="line-height:1.8; margin-bottom:10px;">
+      已存在相似菜名：<br>
+      <strong id="similarNames" style="color:#c0392b;"></strong><br><br>
+      确定要使用当前名称吗？<br>
+      <span style="color:#a0896b;font-size:13px;">如确认是不同菜式可继续；否则建议换名。</span>
+    </p>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" data-close="duplicateModal">换名字</button>
+      <button class="btn btn-primary" id="confirmDuplicateBtn">确认不一样，继续</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script src="data.js"></script>
@@ -1632,6 +1649,67 @@ document.getElementById('autoMatchBtn').addEventListener('click', async () => {
   btn.textContent = oldText;
 });
 
+/* =========================================================
+ *  菜名查重
+ * ========================================================= */
+let pendingDish = null;   // 待确认保存的菜谱数据
+
+// 菜名相似度检测：包含关系 或 编辑距离 ≤ 2
+function findSimilarNames(name, type) {
+  const target = name.trim().toLowerCase();
+  if (!target) return [];
+  const similar = [];
+  DB[type].forEach(d => {
+    const curr = (d.name || '').trim().toLowerCase();
+    if (!curr || curr === target) return;   // 完全相同在前面单独拦截
+    // 1. 包含关系（如「番茄炒蛋」与「炒蛋」）
+    if (curr.includes(target) || target.includes(curr)) {
+      similar.push(d.name); return;
+    }
+    // 2. 编辑距离 ≤ 2（允许插入/删除/替换 1~2 个字符）
+    if (Math.abs(curr.length - target.length) > 2) return;
+    let diff = 0;
+    const len = Math.max(curr.length, target.length);
+    for (let i = 0, j = 0; i < len || j < len;) {
+      const a = curr[i] || '';
+      const b = target[j] || '';
+      if (a === b) { i++; j++; continue; }
+      // 尝试跳跃匹配，判断插入或删除
+      if (curr[i + 1] === target[j]) { i++; diff++; }
+      else if (curr[i] === target[j + 1]) { j++; diff++; }
+      else { i++; j++; diff++; }
+      if (diff > 2) return;
+    }
+    if (diff <= 2) similar.push(d.name);
+  });
+  return similar;
+}
+
+// 真正执行保存（抽出来供「确认不一样」按钮复用）
+async function doSaveDish(dish, type) {
+  if (editingId) {
+    if (editingId.type === type) {
+      DB[editingId.type][editingId.idx] = { ...DB[editingId.type][editingId.idx], ...dish };
+    } else {
+      DB[editingId.type].splice(editingId.idx, 1);
+      DB[type].push(dish);
+    }
+    await dbUpdate(editingId._id, type, dish);
+    toast('已修改', 'success');
+  } else {
+    DB[type].push(dish);
+    await dbInsert(type, dish);
+    toast('已新增', 'success');
+  }
+  closeModal('editModal');
+  await loadDB();
+  renderManageGrid();
+  updateHint();
+  state.meatResult = null; state.vegResult = null;
+  displayDish('meat', null); displayDish('veg', null);
+  updateConfirmBtn();
+}
+
 document.getElementById('saveDishBtn').addEventListener('click', async () => {
   const name = document.getElementById('f_name').value.trim();
   const type = document.getElementById('f_type').value;
@@ -1647,31 +1725,35 @@ document.getElementById('saveDishBtn').addEventListener('click', async () => {
   if (steps.length === 0) return toast('请填写至少一步做法', 'error');
 
   const dish = { name, category, lowFat, singleUse, ingredients, steps };
-  if (editingId) {
-    // 编辑：调用 Supabase update
-    if (editingId.type === type) {
-      DB[editingId.type][editingId.idx] = { ...DB[editingId.type][editingId.idx], ...dish };
-    } else {
-      // 大类改变，先删原位置再插入新位置（内存）
-      DB[editingId.type].splice(editingId.idx, 1);
-      DB[type].push(dish);
+
+  // 仅在「新增」时查重（编辑时允许原名保留）
+  if (!editingId) {
+    // 1) 完全重名 —— 直接拦截
+    const exact = DB[type].some(d => (d.name || '').trim().toLowerCase() === name.toLowerCase());
+    if (exact) {
+      toast(`已存在同名菜谱：${name}`, 'error');
+      return;
     }
-    await dbUpdate(editingId._id, type, dish);
-    toast('已修改', 'success');
-  } else {
-    // 新增：调用 Supabase insert
-    DB[type].push(dish);
-    await dbInsert(type, dish);
-    toast('已新增', 'success');
+    // 2) 相似菜名 —— 弹窗确认（提示用户是不是已新增过）
+    const similar = findSimilarNames(name, type);
+    if (similar.length > 0) {
+      document.getElementById('similarNames').textContent = similar.join('、');
+      pendingDish = { dish, type };
+      openModal('duplicateModal');
+      return;
+    }
   }
-  closeModal('editModal');
-  await loadDB();            // 从 Supabase 重新加载，保持同步
-  renderManageGrid();
-  updateHint();
-  // 重置随机结果
-  state.meatResult = null; state.vegResult = null;
-  displayDish('meat', null); displayDish('veg', null);
-  updateConfirmBtn();
+
+  await doSaveDish(dish, type);
+});
+
+// 查重弹窗 —— 确认不一样，继续保存
+document.getElementById('confirmDuplicateBtn').addEventListener('click', async () => {
+  if (!pendingDish) return;
+  const { dish, type } = pendingDish;
+  pendingDish = null;
+  closeModal('duplicateModal');
+  await doSaveDish(dish, type);
 });
 
 /* =========================================================

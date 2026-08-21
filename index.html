@@ -651,9 +651,13 @@
       </div>
 
       <div class="dish-grid" id="dishGrid"></div>
-      <div style="display:flex; justify-content:space-between; margin-top:14px; flex-wrap:wrap; gap:8px;">
+      <div style="margin-top:14px; padding:10px 12px; background:#fffaf2; border:1px solid #f0e0cc; border-radius:10px;">
+        <div id="fileStatus" style="font-size:12px; line-height:1.6;"></div>
+      </div>
+      <div style="display:flex; justify-content:flex-end; margin-top:10px; flex-wrap:wrap; gap:8px;">
         <button class="btn btn-ghost btn-sm" id="aiConfigBtn">⚙️ AI 接口配置</button>
-        <button class="btn btn-ghost btn-sm" id="resetDBBtn">↩️ 恢复默认菜谱库</button>
+        <button class="btn btn-ghost btn-sm" id="linkFileBtn">📁 关联 data.js</button>
+        <button class="btn btn-ghost btn-sm" id="downloadDataBtn">⬇️ 下载 data.js</button>
       </div>
     </div>
   </div>
@@ -790,28 +794,98 @@
 <script>
 
 /* =========================================================
- *  数据层（localStorage 持久化）
+ *  数据层（直接读写 data.js 文件，不使用 localStorage）
  * ========================================================= */
-const LS_KEY = 'caipu_db_v1';
-let DB = loadDB();
+let DB = JSON.parse(JSON.stringify(DEFAULT_DB));   // 内存中的菜谱数据
 let editingId = null;
+let dbFileHandle = null;                           // File System Access API 文件句柄
 
-function loadDB() {
+/* 是否支持 File System Access API */
+function isFileAPISupported() {
+  return typeof window.showOpenFilePicker === 'function';
+}
+
+/* 关联 data.js 文件，后续增删改自动写入 */
+async function linkDataFile() {
+  if (!isFileAPISupported()) {
+    toast('当前浏览器不支持文件关联（需 Chrome/Edge 86+），请使用「下载 data.js」', 'error');
+    return;
+  }
   try {
-    const raw = localStorage.getItem(LS_KEY);
-    if (raw) {
-      const data = JSON.parse(raw);
-      if (data && Array.isArray(data.meat) && Array.isArray(data.veg)) return data;
+    const [handle] = await window.showOpenFilePicker({
+      types: [{ description: 'JavaScript', accept: { 'application/javascript': ['.js'] } }]
+    });
+    dbFileHandle = handle;
+    await reloadFromFile();
+    updateFileStatus();
+    toast(`已关联 ${handle.name}，增删改将自动写入文件`, 'success');
+  } catch(e) {
+    if (e.name !== 'AbortError') toast('关联失败：' + e.message, 'error');
+  }
+}
+
+/* 从关联的文件重新加载数据 */
+async function reloadFromFile() {
+  if (!dbFileHandle) return;
+  const file = await dbFileHandle.getFile();
+  const text = await file.text();
+  const m = text.match(/DEFAULT_DB\s*=\s*(\{[\s\S]*\})\s*;?\s*$/);
+  if (m) {
+    try {
+      DB = JSON.parse(m[1]);
+      refreshCategorySelect();
+      renderManageGrid();
+      updateHint();
+    } catch(e) {
+      toast('文件 JSON 解析失败：' + e.message, 'error');
     }
-  } catch(e) {}
-  return JSON.parse(JSON.stringify(DEFAULT_DB));
+  }
 }
-function saveDB() {
-  localStorage.setItem(LS_KEY, JSON.stringify(DB));
+
+/* 写入 data.js 文件（异步，不阻塞 UI）*/
+async function saveDB() {
+  if (!dbFileHandle) return;  // 未关联文件，只在内存中修改
+  try {
+    const writable = await dbFileHandle.createWritable();
+    await writable.write(generateDataJsContent());
+    await writable.close();
+  } catch(e) {
+    toast('写入文件失败：' + e.message, 'error');
+  }
 }
-function resetDB() {
-  DB = JSON.parse(JSON.stringify(DEFAULT_DB));
-  saveDB();
+
+/* 生成 data.js 文件内容 */
+function generateDataJsContent() {
+  return `/* 菜谱数据 - 由菜谱应用自动生成 */\n` +
+         `/* 字段：name(菜名) category(品类) lowFat(减脂) singleUse(单次,鱼类true) ingredients(食材) steps(做法) */\n` +
+         `const DEFAULT_DB = ${JSON.stringify(DB, null, 2)};\n`;
+}
+
+/* 下载 data.js（降级方案）*/
+function downloadDataJs() {
+  const blob = new Blob([generateDataJsContent()], { type: 'application/javascript' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'data.js';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast('已下载 data.js，请替换项目目录中的文件后刷新', 'success');
+}
+
+/* 更新文件状态显示 */
+function updateFileStatus() {
+  const el = document.getElementById('fileStatus');
+  if (!el) return;
+  if (dbFileHandle) {
+    el.innerHTML = `<span style="color:#27ae60;">📁 已关联 ${dbFileHandle.name}</span>　增删改自动写入`;
+  } else if (isFileAPISupported()) {
+    el.innerHTML = `<span style="color:#8b6914;">⚠️ 未关联文件</span>　点击「关联 data.js」后修改才会保存`;
+  } else {
+    el.innerHTML = `<span style="color:#8b6914;">⚠️ 浏览器不支持文件关联</span>　修改后请点「下载 data.js」`;
+  }
 }
 
 /* =========================================================
@@ -1556,46 +1630,27 @@ function askDelete(type, idx) {
   if (!d) return;
   deletePending = {type, idx};
   document.getElementById('confirmMsg').innerHTML =
-    `确定要删除 <strong style="color:#c0392b;">${d.name}</strong>（${type === 'meat' ? '荤菜' : '素菜'} · ${d.category}）吗？<br>此操作不可恢复，删除后立即从本地数据库移除。`;
+    `确定要删除 <strong style="color:#c0392b;">${d.name}</strong>（${type === 'meat' ? '荤菜' : '素菜'} · ${d.category}）吗？<br>删除后将自动从 data.js 文件移除。`;
   openModal('confirmModal');
 }
 
-/* =========================================================
- *  恢复默认库
- * ========================================================= */
-document.getElementById('resetDBBtn').addEventListener('click', () => {
-  document.getElementById('confirmMsg').innerHTML =
-    `确定要 <strong style="color:#c0392b;">恢复为默认内置菜谱库</strong> 吗？<br><br>
-     你自己新增或修改的菜谱都会被清除，还原为内置的 79 道菜。`;
-  deletePending = 'RESET_DB';
-  openModal('confirmModal');
-});
-
-// 统一的确认按钮处理（删除 / 恢复默认）
 document.getElementById('confirmOkBtn').addEventListener('click', () => {
   if (!deletePending) return;
-  if (deletePending === 'RESET_DB') {
-    resetDB();
-    deletePending = null;
-    closeModal('confirmModal');
-    toast('已恢复默认菜谱库', 'success');
-    refreshCategorySelect();
-    renderManageGrid();
-    updateHint();
-    state.meatResult = null; state.vegResult = null;
-    displayDish('meat', null); displayDish('veg', null);
-    updateConfirmBtn();
-  } else {
-    const {type, idx} = deletePending;
-    const d = DB[type].splice(idx, 1)[0];
-    saveDB();  // 立即写入 localStorage
-    deletePending = null;
-    closeModal('confirmModal');
-    toast(`已从数据库删除「${d?.name || ''}」`, 'success');
-    renderManageGrid();
-    updateHint();
-  }
+  const {type, idx} = deletePending;
+  const d = DB[type].splice(idx, 1)[0];
+  saveDB();  // 自动写入 data.js
+  deletePending = null;
+  closeModal('confirmModal');
+  toast(`已删除「${d?.name || ''}」`, 'success');
+  renderManageGrid();
+  updateHint();
 });
+
+/* =========================================================
+ *  文件关联 / 下载
+ * ========================================================= */
+document.getElementById('linkFileBtn').addEventListener('click', linkDataFile);
+document.getElementById('downloadDataBtn').addEventListener('click', downloadDataJs);
 
 /* =========================================================
  *  Modal 通用开关
@@ -1642,6 +1697,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   refreshCategorySelect(); // 维护页 select
   updateHint();
+  updateFileStatus();      // 显示文件关联状态
 });
 </script>
 </body>

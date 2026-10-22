@@ -614,7 +614,7 @@
       <span class="x" onclick="this.parentElement.style.display='none'">×</span>
       <strong>📚 菜谱数据说明：</strong>
       所有菜谱保存在 Supabase 云数据库，新增/修改/删除后立即写入数据库并同步到「随机点餐」。
-      数据多设备共享。如需重置为初始内置菜谱，可点击底部「恢复默认菜谱库」。
+      数据多设备共享，多端实时一致。
     </div>
 
     <div class="card">
@@ -904,34 +904,37 @@ async function saveDB() {
   // 仅在非 Supabase 模式下需要，但当前已弃用本地存储，所以这里不做操作
 }
 
-/* ============ CRUD ============ */
+/* ============ CRUD（统一返回 {ok, error}，由调用方决定提示） ============ */
 /* 新增 */
 async function dbInsert(type, dish) {
-  if (!useSupabase) return;
+  if (!useSupabase) return { ok:false, error:'未连接 Supabase，请检查 ai-config.js 配置' };
   const { error } = await supabaseClient.from('dishes').insert({
     type, name: dish.name, category: dish.category,
     lowFat: !!dish.lowFat, singleUse: !!dish.singleUse,
     ingredients: dish.ingredients || [], steps: dish.steps || []
   });
-  if (error) toast('新增失败：' + error.message, 'error');
+  if (error) { console.error('[DB] 新增失败:', error); return { ok:false, error:error.message }; }
+  return { ok:true };
 }
 
 /* 修改 */
 async function dbUpdate(rowId, type, dish) {
-  if (!useSupabase || !rowId) return;
+  if (!useSupabase || !rowId) return { ok:false, error:'未连接数据库或记录ID缺失' };
   const { error } = await supabaseClient.from('dishes').update({
     type, name: dish.name, category: dish.category,
     lowFat: !!dish.lowFat, singleUse: !!dish.singleUse,
     ingredients: dish.ingredients || [], steps: dish.steps || []
   }).eq('id', rowId);
-  if (error) toast('修改失败：' + error.message, 'error');
+  if (error) { console.error('[DB] 修改失败:', error); return { ok:false, error:error.message }; }
+  return { ok:true };
 }
 
 /* 删除 */
 async function dbDelete(rowId) {
-  if (!useSupabase || !rowId) return;
+  if (!useSupabase || !rowId) return { ok:false, error:'未连接数据库或记录ID缺失' };
   const { error } = await supabaseClient.from('dishes').delete().eq('id', rowId);
-  if (error) toast('删除失败：' + error.message, 'error');
+  if (error) { console.error('[DB] 删除失败:', error); return { ok:false, error:error.message }; }
+  return { ok:true };
 }
 
 /* 恢复默认（清表后重新导入）*/
@@ -1789,17 +1792,28 @@ function findSimilarNames(name, type) {
 // 真正执行保存（抽出来供「确认不一样」按钮复用）
 async function doSaveDish(dish, type) {
   if (editingId) {
+    // 先改内存，失败时通过 loadDB 恢复
     if (editingId.type === type) {
       DB[editingId.type][editingId.idx] = { ...DB[editingId.type][editingId.idx], ...dish };
     } else {
       DB[editingId.type].splice(editingId.idx, 1);
       DB[type].push(dish);
     }
-    await dbUpdate(editingId._id, type, dish);
+    const r = await dbUpdate(editingId._id, type, dish);
+    if (!r.ok) {
+      toast('修改失败：' + r.error, 'error');
+      await loadDB();      // 恢复内存与数据库一致
+      return;              // 不关弹窗，保留表单供排查重试
+    }
     toast('已修改', 'success');
   } else {
+    // 先入库，成功才动内存 —— 避免假"已新增"
+    const r = await dbInsert(type, dish);
+    if (!r.ok) {
+      toast('新增失败：' + r.error, 'error');
+      return;              // 不关弹窗，保留表单供排查重试
+    }
     DB[type].push(dish);
-    await dbInsert(type, dish);
     toast('已新增', 'success');
   }
   closeModal('editModal');
@@ -1874,8 +1888,15 @@ document.getElementById('confirmOkBtn').addEventListener('click', async () => {
   if (!deletePending) return;
   const {type, idx, rowId} = deletePending;
   const d = DB[type][idx];
+  // 先删库，成功才动内存 —— 避免假"已删除"
+  const r = await dbDelete(rowId);
+  if (!r.ok) {
+    toast('删除失败：' + r.error, 'error');
+    deletePending = null;
+    closeModal('confirmModal');
+    return;
+  }
   DB[type].splice(idx, 1);
-  await dbDelete(rowId);
   deletePending = null;
   closeModal('confirmModal');
   toast(`已删除「${d?.name || ''}」`, 'success');

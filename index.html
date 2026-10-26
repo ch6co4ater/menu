@@ -656,6 +656,7 @@
       </div>
       <div style="display:flex; justify-content:flex-end; margin-top:10px; flex-wrap:wrap; gap:8px;">
         <button class="btn btn-ghost btn-sm" id="aiConfigBtn">⚙️ AI 接口配置</button>
+        <button class="btn btn-ghost btn-sm" id="linkDirBtn">📁 关联目录</button>
         <button class="btn btn-ghost btn-sm" id="downloadDataBtn">⬇️ 下载备份</button>
       </div>
     </div>
@@ -805,8 +806,8 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="data.js"></script>
-<script src="ai-config.js" onerror="console.log('[Config] 未找到 ai-config.js，使用默认配置')"></script>
+<script src="data.js?v=2"></script>
+<script src="ai-config.js?v=2" onerror="console.log('[Config] 未找到 ai-config.js，使用默认配置')"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 
@@ -904,6 +905,147 @@ async function saveDB() {
   // 仅在非 Supabase 模式下需要，但当前已弃用本地存储，所以这里不做操作
 }
 
+/* =========================================================
+ *  data.js 自动同步（本地改库后自动写回文件，供提交 GitHub 部署手机端）
+ *  数据流：电脑端(写) → Supabase(权威) → data.js → GitHub → 手机端(只读)
+ * ========================================================= */
+let syncDirHandle = null;          // 项目目录句柄（data.js + index.html 所在目录）
+let dataJsHandle = null;           // data.js 文件句柄
+let indexHtmlHandle = null;        // index.html 文件句柄
+let syncing = false;               // 防并发写
+
+/* 是否支持 File System Access API */
+function isFileAPISupported() {
+  return typeof window.showDirectoryPicker === 'function';
+}
+
+/* ----- IndexedDB 存取目录句柄（授权一次，之后自动恢复）----- */
+const IDB_NAME = 'caipu_sync', IDB_STORE = 'handles';
+function idbGet(key) {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+    req.onsuccess = () => {
+      const tx = req.result.transaction(IDB_STORE, 'readonly');
+      const r = tx.objectStore(IDB_STORE).get(key);
+      r.onsuccess = () => resolve(r.result);
+      r.onerror = () => reject(r.error);
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+function idbSet(key, value) {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+    req.onsuccess = () => {
+      const tx = req.result.transaction(IDB_STORE, 'readwrite');
+      const r = tx.objectStore(IDB_STORE).put(value, key);
+      r.onsuccess = () => resolve();
+      r.onerror = () => reject(r.error);
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/* 恢复上次授权的目录句柄（云端是权威数据源，恢复后不回读文件）*/
+async function restoreSyncDir() {
+  if (!isFileAPISupported()) { updateFileStatus(); return; }
+  try {
+    const handle = await idbGet('syncDir');
+    if (!handle) { updateFileStatus(); return; }
+    let perm = await handle.queryPermission({ mode: 'readwrite' });
+    if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'readwrite' });
+    if (perm === 'granted') {
+      syncDirHandle = handle;
+      dataJsHandle = await syncDirHandle.getFileHandle('data.js');
+      indexHtmlHandle = await syncDirHandle.getFileHandle('index.html');
+      console.log('[Sync] 已自动恢复目录关联:', handle.name);
+    }
+    updateFileStatus();
+  } catch(e) {
+    console.log('[Sync] 自动恢复失败:', e.message);
+    updateFileStatus();
+  }
+}
+
+/* 手动关联项目目录 */
+async function linkSyncDir() {
+  if (!isFileAPISupported()) {
+    toast('当前浏览器不支持目录关联（需 Chrome/Edge 86+）', 'error');
+    return;
+  }
+  try {
+    const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    // 校验目录里有这两个文件
+    try {
+      await handle.getFileHandle('data.js');
+      await handle.getFileHandle('index.html');
+    } catch(e) {
+      toast('该目录下没有 data.js / index.html，请选择项目根目录', 'error');
+      return;
+    }
+    syncDirHandle = handle;
+    dataJsHandle = await syncDirHandle.getFileHandle('data.js');
+    indexHtmlHandle = await syncDirHandle.getFileHandle('index.html');
+    await idbSet('syncDir', handle);   // 持久化，下次自动恢复
+    updateFileStatus();
+    toast('已关联项目目录，之后改菜谱会自动同步 data.js', 'success');
+  } catch(e) {
+    if (e.name !== 'AbortError') toast('关联失败：' + e.message, 'error');
+  }
+}
+
+/* 生成 data.js 文件内容（从云端全量数据）*/
+function generateDataJsContent() {
+  const strip = arr => arr.map(({_id, ...d}) => d);
+  const meat = strip(DB.meat), veg = strip(DB.veg);
+  return `/* =========================================================\n` +
+         ` *  内置菜谱库（${meat.length}荤 + ${veg.length}素 = ${meat.length + veg.length}道）\n` +
+         ` *  由菜谱应用自动同步自 Supabase 云数据库 - ${new Date().toLocaleString('zh-CN')}\n` +
+         ` *  被 index.html 通过 <script src="data.js"> 加载，手机端 GitHub Pages 展示用。\n` +
+         ` * ========================================================= */\n` +
+         `const DEFAULT_DB = ${JSON.stringify({meat, veg}, null, 2)};\n`;
+}
+
+/* 把 index.html 中 data.js 引用的版本号 +1（防手机端缓存）*/
+async function bumpDataVersion() {
+  if (!indexHtmlHandle) return;
+  try {
+    const file = await indexHtmlHandle.getFile();
+    const text = await file.text();
+    const updated = text.replace(/(<script src=")data\.js(\?v=(\d+))?(")/,
+      (m, p1, p2, p3, p4) => `${p1}data.js?v=${(parseInt(p3 || '1', 10) + 1)}${p4}`);
+    if (updated !== text) {
+      const writable = await indexHtmlHandle.createWritable();
+      await writable.write(updated);
+      await writable.close();
+      console.log('[Sync] index.html 版本号已自增');
+    }
+  } catch(e) {
+    console.error('[Sync] 版本号自增失败:', e.message);
+  }
+}
+
+/* 核心同步：把内存 DB（已与云端一致）写回 data.js，并自增 index.html 版本号 */
+async function syncToDataJs() {
+  if (!dataJsHandle || syncing) return false;
+  syncing = true;
+  try {
+    const writable = await dataJsHandle.createWritable();
+    await writable.write(generateDataJsContent());
+    await writable.close();
+    await bumpDataVersion();
+    console.log('[Sync] data.js 已同步');
+    return true;
+  } catch(e) {
+    toast('data.js 同步失败：' + e.message, 'error');
+    return false;
+  } finally {
+    syncing = false;
+  }
+}
+
 /* ============ CRUD（统一返回 {ok, error}，由调用方决定提示） ============ */
 /* 新增 */
 async function dbInsert(type, dish) {
@@ -950,8 +1092,10 @@ async function dbReset() {
 function updateFileStatus() {
   const el = document.getElementById('fileStatus');
   if (!el) return;
-  if (useSupabase) {
-    el.innerHTML = `<span style="color:#27ae60;">☁️ 已连接 Supabase 云数据库</span>　增删改自动同步`;
+  if (useSupabase && dataJsHandle) {
+    el.innerHTML = `<span style="color:#27ae60;">☁️ 已连接 Supabase</span>　<span style="color:#27ae60;">📁 已关联项目目录</span>　改菜谱自动同步 data.js，提交 GitHub 后手机端生效`;
+  } else if (useSupabase) {
+    el.innerHTML = `<span style="color:#27ae60;">☁️ 已连接 Supabase 云数据库</span>　<span style="color:#8b6914;">⚠️ 未关联目录</span>　点「关联目录」后改菜谱可自动同步 data.js（供手机端展示）`;
   } else {
     el.innerHTML = `<span style="color:#8b6914;">⚠️ 未连接 Supabase</span>　请在 ai-config.js 中配置 supabaseUrl 和 supabaseKey`;
   }
@@ -964,12 +1108,14 @@ function loadAIConfig() {
   // 从 ai-config.js 中赋值的 window.AI_CONFIG 读取
   if (typeof window.AI_CONFIG === 'object' && window.AI_CONFIG) {
     return {
-      baseUrl: window.AI_CONFIG.baseUrl || '',
-      apiKey:  window.AI_CONFIG.apiKey  || '',
-      model:   window.AI_CONFIG.model   || ''
+      baseUrl:     window.AI_CONFIG.baseUrl || '',
+      apiKey:      window.AI_CONFIG.apiKey  || '',
+      model:       window.AI_CONFIG.model   || '',
+      supabaseUrl: window.AI_CONFIG.supabaseUrl || '',
+      supabaseKey: window.AI_CONFIG.supabaseKey || ''
     };
   }
-  return { baseUrl: '', apiKey: '', model: '' };
+  return { baseUrl: '', apiKey: '', model: '', supabaseUrl: '', supabaseKey: '' };
 }
 
 /* =========================================================
@@ -1818,6 +1964,8 @@ async function doSaveDish(dish, type) {
   }
   closeModal('editModal');
   await loadDB();
+  const synced = await syncToDataJs();
+  if (synced) toast('已同步到 data.js，请提交 GitHub 部署手机端', 'success');
   renderManageGrid();
   updateHint();
   state.meatResult = null; state.vegResult = null;
@@ -1900,6 +2048,7 @@ document.getElementById('confirmOkBtn').addEventListener('click', async () => {
   deletePending = null;
   closeModal('confirmModal');
   toast(`已删除「${d?.name || ''}」`, 'success');
+  await syncToDataJs();
   renderManageGrid();
   updateHint();
 });
@@ -1967,16 +2116,19 @@ document.addEventListener('DOMContentLoaded', () => {
   refreshCategorySelect(); // 维护页 select
   updateHint();
 
+  // 关联目录按钮
+  document.getElementById('linkDirBtn').addEventListener('click', linkSyncDir);
+
   // 初始化 Supabase + 加载数据
   (async () => {
     initSupabase();
-    updateFileStatus();
     if (useSupabase) {
       await seedIfEmpty();   // 首次自动导入默认菜谱
       await loadDB();        // 从 Supabase 加载
     } else {
       DB = JSON.parse(JSON.stringify(DEFAULT_DB));
     }
+    await restoreSyncDir();  // 恢复目录关联（授权一次后自动）
     refreshCategorySelect();
     renderManageGrid();
     updateHint();

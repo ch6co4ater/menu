@@ -1,0 +1,42 @@
+name: Supabase Keep Alive
+
+# Supabase 免费项目闲置 7 天会自动暂停，这里每 5 天发一次只读查询保持活跃。
+# 在仓库 Settings -> Secrets and variables -> Actions 中添加：
+#   SUPABASE_URL  https://hjibacuptkzibgmlikis.supabase.co
+#   SUPABASE_KEY  sb_publishable_xxxxxxxx
+
+on:
+  schedule:
+    # 每月 1/6/11/16/21/26/31 号 UTC 03:00（北京时间 11:00），最大间隔 5 天
+    - cron: '0 3 */5 * *'
+  workflow_dispatch:   # 支持手动触发
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query Supabase dishes table
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
+            echo "缺少 SUPABASE_URL 或 SUPABASE_KEY 密钥，请在仓库 Settings -> Secrets 中配置"
+            exit 1
+          fi
+
+          BASE="${SUPABASE_URL%/}"
+          code=$(curl -s -o /tmp/resp.txt -w "%{http_code}" \
+            -H "apikey: $SUPABASE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_KEY" \
+            "$BASE/rest/v1/dishes?select=id&limit=1")
+
+          echo "HTTP $code"
+          head -c 500 /tmp/resp.txt || true
+          echo
+
+          if [ "$code" != "200" ]; then
+            echo "唤活失败：请到 Supabase Dashboard 检查项目是否已暂停"
+            exit 1
+          fi
+          echo "唤活成功"
